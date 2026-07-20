@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { supabase } from "./supabase.js";
 
 const CATEGORIAS = [
   { cat: "A", tope: 10277988.13,  impServ: 4780.46,   impVenta: 4780.46,   sipa: 15616.17, obraSocial: 21990.11 },
@@ -48,13 +49,6 @@ function calcMetricas(c){
   return {totalM,catM,pctM,totalEJ,catEJ,pctEJ,totalAn,catAn,pctAn,topeMes,facMesAct,pctMes,maxPct:Math.max(pctM,pctEJ,pctAn),cuota:getCuota(catM,c.actividad)};
 }
 
-const SEED_MONO = [
-  { id:1, nombre:"Rodríguez, Ana M.",   cuit:"27-32145678-4", actividad:"Servicios",             notas:"", facMensual:{"2025-06":710000,"2025-07":680000,"2025-08":750000,"2025-09":820000,"2025-10":890000,"2025-11":760000,"2025-12":930000,"2026-01":980000,"2026-02":1050000,"2026-03":1100000,"2026-04":980000,"2026-05":1020000}},
-  { id:2, nombre:"López, Martín G.",    cuit:"20-28765432-1", actividad:"Venta de cosas muebles",notas:"Revisar julio", facMensual:{"2025-06":1350000,"2025-07":1400000,"2025-08":1500000,"2025-09":1600000,"2025-10":1700000,"2025-11":1550000,"2025-12":1800000,"2026-01":1900000,"2026-02":2100000,"2026-03":2200000,"2026-04":2050000,"2026-05":2150000}},
-  { id:3, nombre:"Fernández, Diego R.", cuit:"20-35123456-7", actividad:"Servicios",             notas:"", facMensual:{"2025-06":4800000,"2025-07":5000000,"2025-08":5200000,"2025-09":5500000,"2025-10":5800000,"2025-11":5600000,"2025-12":6000000,"2026-01":6200000,"2026-02":6500000,"2026-03":6800000,"2026-04":6400000,"2026-05":6600000}},
-  { id:4, nombre:"Gómez, Patricia S.",  cuit:"27-29876543-2", actividad:"Servicios",             notas:"", facMensual:{"2025-06":720000,"2025-07":690000,"2025-08":710000,"2025-09":730000,"2025-10":750000,"2025-11":720000,"2025-12":780000,"2026-01":800000,"2026-02":820000,"2026-03":850000,"2026-04":830000,"2026-05":840000}},
-];
-
 const NAV = [
   { id:"dashboard",       icon:"⊞",  label:"Dashboard" },
   { id:"monotributistas", icon:"📋", label:"Monotributistas" },
@@ -62,11 +56,72 @@ const NAV = [
   { id:"sociedades",      icon:"🏢", label:"Sociedades",       pronto:true },
   { id:"vencimientos",    icon:"📅", label:"Vencimientos",     pronto:true },
   { id:"reportes",        icon:"📊", label:"Reportes",         pronto:true },
-];export default function App() {
-  const [seccion, setSeccion] = useState("dashboard");
-  const [mono, setMono]       = useState(SEED_MONO);
+];
+
+export default function App() {
+  const [seccion, setSeccion]     = useState("dashboard");
+  const [mono, setMono]           = useState([]);
+  const [loading, setLoading]     = useState(true);
   const [sidebarOpen, setSidebar] = useState(true);
 
+  // Cargar clientes desde Supabase
+  useEffect(() => {
+    cargarClientes();
+  }, []);
+
+  async function cargarClientes() {
+    setLoading(true);
+    try {
+      const { data: clientes } = await supabase.from("clientes").select("*");
+      const { data: facturacion } = await supabase.from("facturacion").select("*");
+
+      const clientesConFac = (clientes || []).map(c => ({
+        ...c,
+        facMensual: Object.fromEntries(
+          (facturacion || [])
+            .filter(f => f.cliente_id === c.id)
+            .map(f => [ym(f.anio, f.mes - 1), f.monto])
+        )
+      }));
+      setMono(clientesConFac);
+    } catch(e) {
+      console.error(e);
+    }
+    setLoading(false);
+  }
+
+  async function guardarCliente(form) {
+    try {
+      let clienteId = form.id;
+      if (form.id) {
+        await supabase.from("clientes").update({
+          nombre: form.nombre, cuit: form.cuit,
+          actividad: form.actividad, notas: form.notas
+        }).eq("id", form.id);
+      } else {
+        const { data } = await supabase.from("clientes").insert({
+          nombre: form.nombre, cuit: form.cuit,
+          actividad: form.actividad, notas: form.notas
+        }).select().single();
+        clienteId = data.id;
+      }
+      // Guardar facturación
+      for (const [clave, monto] of Object.entries(form.facMensual || {})) {
+        const [anio, mes] = clave.split("-").map(Number);
+        await supabase.from("facturacion").upsert({
+          cliente_id: clienteId, anio, mes, monto
+        }, { onConflict: "cliente_id,anio,mes" });
+      }
+      await cargarClientes();
+    } catch(e) { console.error(e); }
+  }
+
+  async function eliminarCliente(id) {
+    if(confirm("¿Eliminar este cliente?")) {
+      await supabase.from("clientes").delete().eq("id", id);
+      await cargarClientes();
+    }
+  }
   return (
     <div style={{display:"flex",minHeight:"100vh",background:"#f1f4f9",fontFamily:"'IBM Plex Sans',sans-serif",color:"#1a1a2e"}}>
       <style>{`
@@ -128,7 +183,7 @@ const NAV = [
         .fbtn.act{background:#1e3a5f;border-color:#1e3a5f;color:white;}
       `}</style>
 
-      <aside style={{width:sidebarOpen?220:0,minWidth:sidebarOpen?220:0,background:"white",borderRight:"1px solid #e8edf5",display:"flex",flexDirection:"column",transition:"all .2s",overflow:"hidden",flexShrink:0,boxShadow:"2px 0 8px #0000000a"}}>
+      <aside style={{width:sidebarOpen?220:0,minWidth:sidebarOpen?220:0,background:"white",borderRight:"1px solid #e8edf5",display:"flex",flexDirection:"column",transition:"all .2s",overflow:"hidden",flexShrink:0}}>
         <div style={{padding:"18px 16px 12px",borderBottom:"1px solid #f1f4f9"}}>
           <div style={{fontFamily:"'Sora',sans-serif",fontWeight:800,fontSize:16,color:"#1e3a5f"}}>⚖ EstudioCont</div>
           <div style={{fontSize:10.5,color:"#94a3b8",marginTop:3,letterSpacing:".4px",textTransform:"uppercase"}}>Sistema Contable</div>
@@ -164,9 +219,18 @@ const NAV = [
           </div>
         </header>
         <main style={{flex:1,overflow:"auto",padding:"24px 28px"}}>
-          {seccion==="dashboard"       && <Dashboard mono={mono}/>}
-          {seccion==="monotributistas" && <Monotributistas clientes={mono} setClientes={setMono}/>}
-          {(seccion==="resp_inscriptos"||seccion==="sociedades"||seccion==="vencimientos"||seccion==="reportes") && <Pronto seccion={seccion}/>}
+          {loading ? (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"60vh",flexDirection:"column",gap:16}}>
+              <div style={{fontSize:32}}>⚖</div>
+              <div style={{fontFamily:"'Sora',sans-serif",fontWeight:800,fontSize:18,color:"#1e3a5f"}}>Cargando datos...</div>
+            </div>
+          ) : (
+            <>
+              {seccion==="dashboard" && <Dashboard mono={mono}/>}
+              {seccion==="monotributistas" && <Monotributistas clientes={mono} onGuardar={guardarCliente} onEliminar={eliminarCliente}/>}
+              {(seccion==="resp_inscriptos"||seccion==="sociedades"||seccion==="vencimientos"||seccion==="reportes") && <Pronto seccion={seccion}/>}
+            </>
+          )}
         </main>
       </div>
     </div>
@@ -201,8 +265,7 @@ function Dashboard({mono}){
               <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #f1f4f9"}}>
                 <div><div style={{fontWeight:600,fontSize:13}}>{c.nombre}</div><div style={{fontSize:11.5,color:"#94a3b8",marginTop:1}}>{c.cuit}</div></div>
                 <div style={{textAlign:"right"}}><span className="chip" style={{background:s.bg,color:s.fg,borderColor:s.brd}}>{s.label}</span><div style={{fontSize:11,color:"#94a3b8",marginTop:3}}>Cat. {c.catM?.cat||"K+"} · {PCT(c.maxPct)}</div></div>
-              </div>);})
-          }
+              </div>);})}
         </div>
         <div className="card">
           <div style={{fontWeight:700,fontSize:14,color:"#1e3a5f",marginBottom:14}}>📅 Próximas recategorizaciones</div>
@@ -225,9 +288,9 @@ function Dashboard({mono}){
 function Pronto({seccion}){
   const info={
     resp_inscriptos:{icon:"🧾",title:"Responsables Inscriptos",desc:"Control de IVA, Ganancias, IIBB y estados de resultado."},
-    sociedades:     {icon:"🏢",title:"Sociedades & Fideicomisos",desc:"Cierres de ejercicio, balances y Ganancias Sociedades."},
-    vencimientos:   {icon:"📅",title:"Calendario de Vencimientos",desc:"Alertas automáticas de vencimientos impositivos."},
-    reportes:       {icon:"📊",title:"Reportes & Exportación",desc:"Estados de resultado, balances y exportación a Excel/PDF."},
+    sociedades:{icon:"🏢",title:"Sociedades & Fideicomisos",desc:"Cierres de ejercicio, balances y Ganancias Sociedades."},
+    vencimientos:{icon:"📅",title:"Calendario de Vencimientos",desc:"Alertas automáticas de vencimientos impositivos."},
+    reportes:{icon:"📊",title:"Reportes & Exportación",desc:"Estados de resultado, balances y exportación a Excel/PDF."},
   };
   const i=info[seccion]||{icon:"🔧",title:"En desarrollo",desc:"Próximamente."};
   return(
@@ -238,7 +301,8 @@ function Pronto({seccion}){
       <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:"12px 20px",fontSize:13,color:"#1e40af",fontWeight:600}}>🚧 Módulo en construcción</div>
     </div>
   );
-}function Monotributistas({clientes,setClientes}){
+}
+function Monotributistas({clientes,onGuardar,onEliminar}){
   const [modal,setModal]=useState(false);
   const [editando,setEdit]=useState(null);
   const [detalle,setDet]=useState(null);
@@ -258,14 +322,10 @@ function Pronto({seccion}){
     return{total:clientes.length,ok:p.filter(x=>x<70).length,atencion:p.filter(x=>x>=70&&x<85).length,riesgo:p.filter(x=>x>=85&&x<100).length,excluidos:p.filter(x=>x>=100).length};
   },[clientes]);
 
-  const guardar=f=>{
-    if(f.id) setClientes(p=>p.map(c=>c.id===f.id?f:c));
-    else setClientes(p=>[...p,{...f,id:Date.now(),facMensual:f.facMensual||{}}]);
+  const guardar=async f=>{
+    await onGuardar(f);
     setModal(false);setEdit(null);
-    if(detalle?.id===f.id)setDet(f);
-  };
-  const eliminar=id=>{
-    if(confirm("¿Eliminar cliente?")){setClientes(p=>p.filter(c=>c.id!==id));if(detalle?.id===id)setDet(null);}
+    if(detalle?.id===f.id)setDet(null);
   };
 
   return(
@@ -296,7 +356,7 @@ function Pronto({seccion}){
         <table className="tbl">
           <thead><tr><th>Cliente</th><th>CUIT</th><th>Cat.</th><th>Tope ÷12</th><th>Fact. {MESES[MES]}</th><th>Año móvil 12m</th><th>Ene→Jul</th><th>Ene→Dic</th><th>Cuota/mes</th><th>Estado</th><th></th></tr></thead>
           <tbody>
-            {filtrados.length===0&&<tr><td colSpan={11} style={{textAlign:"center",padding:28,color:"#94a3b8"}}>Sin resultados.</td></tr>}
+            {filtrados.length===0&&<tr><td colSpan={11} style={{textAlign:"center",padding:28,color:"#94a3b8"}}>Sin clientes cargados. ¡Agregá el primero!</td></tr>}
             {filtrados.map(c=>{
               const m=calcMetricas(c);
               const s=semaforo(m.maxPct),sM=semaforo(m.pctM),sEJ=semaforo(m.pctEJ),sAn=semaforo(m.pctAn),sMes=semaforo(m.pctMes);
@@ -312,7 +372,7 @@ function Pronto({seccion}){
                   <td><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:12,fontWeight:600}}>{ARS(m.totalAn)}</div><div className="bar" style={{width:90,marginTop:3}}><div className="bar-f" style={{width:PCT(m.pctAn),background:sAn.fg}}/></div><div style={{fontSize:10,color:sAn.fg,fontWeight:600}}>{PCT(m.pctAn)}</div></td>
                   <td style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:12,fontWeight:600,color:"#1e3a5f"}}>{ARS(m.cuota)}</td>
                   <td><span className="chip" style={{background:s.bg,color:s.fg,borderColor:s.brd}}>{s.label}</span></td>
-                  <td onClick={e=>e.stopPropagation()}><div style={{display:"flex",gap:5}}><button className="btn-s" onClick={()=>{setEdit(c);setModal(true);}}>✏</button><button className="btn-s del" onClick={()=>eliminar(c.id)}>×</button></div></td>
+                  <td onClick={e=>e.stopPropagation()}><div style={{display:"flex",gap:5}}><button className="btn-s" onClick={()=>{setEdit(c);setModal(true);}}>✏</button><button className="btn-s del" onClick={()=>onEliminar(c.id)}>×</button></div></td>
                 </tr>
               );
             })}
